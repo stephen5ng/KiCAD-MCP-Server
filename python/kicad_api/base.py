@@ -10,6 +10,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Server version for client-side feature detection
+SERVER_VERSION = "2.1.0-alpha.5"
+
 
 class KiCADBackend(ABC):
     """Abstract base class for KiCAD API backends"""

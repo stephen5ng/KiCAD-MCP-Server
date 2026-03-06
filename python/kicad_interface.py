@@ -422,6 +422,7 @@ class KiCADInterface:
         "add_text": "_ipc_add_text",
         "add_board_text": "_ipc_add_text",
         "set_board_size": "_ipc_set_board_size",
+        "get_board_extents": "_ipc_get_board_extents",
         "get_board_info": "_ipc_get_board_info",
         "add_board_outline": "_ipc_add_board_outline",
         "add_mounting_hole": "_ipc_add_mounting_hole",
@@ -1622,6 +1623,21 @@ class KiCADInterface:
             logger.error(f"IPC set_board_size error: {e}")
             return {"success": False, "message": str(e)}
 
+    
+    def _ipc_get_board_extents(self, params):
+        """IPC handler for get_board_extents"""
+        try:
+            unit = params.get("unit", "mm")
+            result = self.ipc_board_api.get_board_extents(unit)
+            return {
+                "success": True,
+                "extents": result,
+                "message": "Retrieved board extents via IPC"
+            }
+        except Exception as e:
+            logger.error(f"IPC get_board_extents error: {e}")
+            return {"success": False, "message": str(e)}
+
     def _ipc_get_board_info(self, params):
         """IPC handler for get_board_info"""
         try:
@@ -1961,7 +1977,8 @@ class KiCADInterface:
             "ipc_connected": (
                 self.ipc_backend.is_connected() if self.ipc_backend else False
             ),
-            "version": self.ipc_backend.get_version() if self.ipc_backend else "N/A",
+                        "version": self.ipc_backend.get_version() if self.ipc_backend else "N/A",
+            "server_version": "2.1.0-alpha.5",
             "message": (
                 "Using IPC backend with real-time UI sync"
                 if self.use_ipc

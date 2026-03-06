@@ -324,17 +324,29 @@ class IPCBoardAPI(BoardAPI):
 
     def set_size(self, width: float, height: float, unit: str = "mm") -> bool:
         """
-        Set board size by clearing existing Edge.Cuts and creating a new rectangle.
+        Set board size by clearing existing Edge.Cuts and creating a new rectangle using segments.
+        Maintains the current top-left anchor point if possible.
         """
         try:
-            from kipy.board_types import BoardRectangle
+            from kipy.board_types import BoardSegment
             from kipy.geometry import Vector2
-            from kipy.util.units import from_mm
+            from kipy.util.units import from_mm, to_mm
             from kipy.proto.board.board_types_pb2 import BoardLayer
 
             board = self._get_board()
 
-            # Convert to nm
+            # Get current board edges bounding box to find the anchor
+            try:
+                board_box = board.get_bounding_box()
+                if board_box and (board_box.max.x > board_box.min.x):
+                    anchor_x_nm = board_box.min.x
+                    anchor_y_nm = board_box.min.y
+                else:
+                    anchor_x_nm = anchor_y_nm = 0
+            except:
+                anchor_x_nm = anchor_y_nm = 0
+
+            # Convert target size to nm
             if unit == "mm":
                 w = from_mm(width)
                 h = from_mm(height)
@@ -342,68 +354,127 @@ class IPCBoardAPI(BoardAPI):
                 w = int(width * 25400000)
                 h = int(height * 25400000)
 
-            # Clear existing board outline on Edge.Cuts layer
+            # Clear existing board outline items
             commit = board.begin_commit()
-            shapes = board.get_shapes()
-            edge_cuts_shapes = [s for s in shapes if s.layer == BoardLayer.BL_Edge_Cuts]
-            if edge_cuts_shapes:
-                board.remove_items(edge_cuts_shapes)
+            
+            items_to_remove = []
+            for s in board.get_shapes():
+                if s.layer == BoardLayer.BL_Edge_Cuts:
+                    items_to_remove.append(s)
+            for t in board.get_tracks():
+                if t.layer == BoardLayer.BL_Edge_Cuts:
+                    items_to_remove.append(t)
+            for z in board.get_zones():
+                if BoardLayer.BL_Edge_Cuts in z.layers:
+                    items_to_remove.append(z)
 
-            # Create board outline rectangle on Edge.Cuts layer
-            rect = BoardRectangle()
-            rect.start = Vector2.from_xy(0, 0)
-            rect.end = Vector2.from_xy(w, h)
-            rect.layer = BoardLayer.BL_Edge_Cuts
-            rect.width = from_mm(0.1)
+            if items_to_remove:
+                board.remove_items(items_to_remove)
 
-            board.create_items(rect)
-            board.push_commit(commit, f"Set board size to {width}x{height} {unit}")
+            # Create board outline using 4 segments (most reliable for KiCad)
+            lines_list = []
+            coords = [
+                (anchor_x_nm, anchor_y_nm, anchor_x_nm + w, anchor_y_nm),
+                (anchor_x_nm + w, anchor_y_nm, anchor_x_nm + w, anchor_y_nm + h),
+                (anchor_x_nm + w, anchor_y_nm + h, anchor_x_nm, anchor_y_nm + h),
+                (anchor_x_nm, anchor_y_nm + h, anchor_x_nm, anchor_y_nm)
+            ]
+            
+            for x1, y1, x2, y2 in coords:
+                seg = BoardSegment()
+                seg.start = Vector2.from_xy(x1, y1)
+                seg.end = Vector2.from_xy(x2, y2)
+                seg.layer = BoardLayer.BL_Edge_Cuts
+                seg.attributes.stroke.width = from_mm(0.1)
+                lines_list.append(seg)
 
-            self._notify("board_size", {"width": width, "height": height, "unit": unit})
+            board.create_items(lines_list)
+            board.push_commit(commit, f"Set board size to {width}x{height} {unit} at anchor ({to_mm(anchor_x_nm)}, {to_mm(anchor_y_nm)})")
+
+            self._notify("board_size", {"width": width, "height": height, "unit": unit, "anchor": {"x": to_mm(anchor_x_nm), "y": to_mm(anchor_y_nm)}})
             return True
 
         except Exception as e:
             logger.error(f"Failed to set board size: {e}")
             return False
 
+
+    def get_board_extents(self, unit: str = "mm") -> Dict[str, Any]:
+        """Get current board extents via IPC."""
+        try:
+            from kipy.proto.board.board_types_pb2 import BoardLayer
+            
+            board = self._get_board()
+            shapes = board.get_shapes()
+            tracks = board.get_tracks()
+            zones = board.get_zones()
+            
+            min_x = min_y = float("inf")
+            max_x = max_y = float("-inf")
+            
+            # Filter and collect all Edge.Cuts items
+            edge_items = []
+            for s in shapes:
+                if s.layer == BoardLayer.BL_Edge_Cuts:
+                    edge_items.append(s)
+            for t in tracks:
+                if t.layer == BoardLayer.BL_Edge_Cuts:
+                    edge_items.append(t)
+            for z in zones:
+                if BoardLayer.BL_Edge_Cuts in z.layers:
+                    edge_items.append(z)
+            
+            for item in edge_items:
+                bbox = board.get_item_bounding_box(item)
+                if bbox:
+                    # Box2 in kipy has .pos (Vector2) and .size (Vector2)
+                    # min is pos, max is pos + size
+                    ix = bbox.pos.x
+                    iy = bbox.pos.y
+                    iw = bbox.size.x
+                    ih = bbox.size.y
+                    
+                    min_x = min(min_x, ix)
+                    min_y = min(min_y, iy)
+                    max_x = max(max_x, ix + iw)
+                    max_y = max(max_y, iy + ih)
+            
+            if min_x == float("inf"):
+                return {
+                    "left": 0, "top": 0, "right": 0, "bottom": 0,
+                    "width": 0, "height": 0, "center": {"x": 0, "y": 0},
+                    "unit": unit
+                }
+            
+            # Scale for output
+            scale = 1000000.0 if unit == "mm" else 25400000.0
+            
+            return {
+                "left": min_x / scale,
+                "top": min_y / scale,
+                "right": max_x / scale,
+                "bottom": max_y / scale,
+                "width": (max_x - min_x) / scale,
+                "height": (max_y - min_y) / scale,
+                "center": {
+                    "x": ((min_x + max_x) / 2.0) / scale,
+                    "y": ((min_y + max_y) / 2.0) / scale
+                },
+                "unit": unit
+            }
+        except Exception as e:
+            logger.error(f"Failed to get board extents: {e}")
+            return {
+                "left": 0, "top": 0, "right": 0, "bottom": 0,
+                "width": 0, "height": 0, "center": {"x": 0, "y": 0},
+                "unit": unit,
+                "error": str(e)
+            }
+            }
     def get_size(self) -> Dict[str, float]:
         """Get current board size from bounding box."""
-        try:
-            board = self._get_board()
-
-            # Get shapes on Edge.Cuts layer to determine board size
-            shapes = board.get_shapes()
-
-            if not shapes:
-                return {"width": 0, "height": 0, "unit": "mm"}
-
-            # Find bounding box of edge cuts
-            from kipy.util.units import to_mm
-
-            min_x = min_y = float('inf')
-            max_x = max_y = float('-inf')
-
-            for shape in shapes:
-                # Check if on Edge.Cuts layer
-                bbox = board.get_item_bounding_box(shape)
-                if bbox:
-                    min_x = min(min_x, bbox.min.x)
-                    min_y = min(min_y, bbox.min.y)
-                    max_x = max(max_x, bbox.max.x)
-                    max_y = max(max_y, bbox.max.y)
-
-            if min_x == float('inf'):
-                return {"width": 0, "height": 0, "unit": "mm"}
-
-            return {
-                "width": to_mm(max_x - min_x),
-                "height": to_mm(max_y - min_y),
-                "unit": "mm"
-            }
-
-        except Exception as e:
-            logger.error(f"Failed to get board size: {e}")
-            return {"width": 0, "height": 0, "unit": "mm", "error": str(e)}
+        extents = self.get_board_extents("mm")
+        return {"width": extents["width"], "height": extents["height"], "unit": "mm"}
 
     def add_layer(self, layer_name: str, layer_type: str) -> bool:
         """Add layer to the board (layers are typically predefined in KiCAD)."""
@@ -672,15 +743,15 @@ class IPCBoardAPI(BoardAPI):
         Creates a basic footprint via IPC with just reference/value fields.
         """
         try:
-            from kipy.board_types import Footprint
+            from kipy.board_types import FootprintInstance
             from kipy.geometry import Vector2, Angle
             from kipy.util.units import from_mm
             from kipy.proto.board.board_types_pb2 import BoardLayer
 
             board = self._get_board()
 
-            # Create footprint
-            fp = Footprint()
+            # Create footprint instance
+            fp = FootprintInstance()
             fp.position = Vector2.from_xy(from_mm(x), from_mm(y))
             fp.orientation = Angle.from_degrees(rotation)
 
@@ -691,10 +762,8 @@ class IPCBoardAPI(BoardAPI):
                 fp.layer = BoardLayer.BL_F_Cu
 
             # Set reference and value
-            if fp.reference_field:
-                fp.reference_field.text.value = reference
-            if fp.value_field:
-                fp.value_field.text.value = value if value else footprint
+            fp.reference_field.text.value = reference
+            fp.value_field.text.value = value if value else footprint
 
             # Begin transaction
             commit = board.begin_commit()
