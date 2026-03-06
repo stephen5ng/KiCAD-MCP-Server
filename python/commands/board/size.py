@@ -6,7 +6,7 @@ import pcbnew
 import logging
 from typing import Dict, Any, Optional
 
-logger = logging.getLogger('kicad_interface')
+logger = logging.getLogger("kicad_interface")
 
 class BoardSizeCommands:
     """Handles board size operations"""
@@ -36,6 +36,13 @@ class BoardSizeCommands:
                     "errorDetails": "Both width and height are required"
                 }
 
+            # Clear existing board outline on Edge.Cuts layer
+            edge_cuts_id = self.board.GetLayerID("Edge.Cuts")
+            drawings = self.board.GetDrawings()
+            for item in list(drawings):
+                if item.GetLayer() == edge_cuts_id:
+                    self.board.Remove(item)
+
             # Create board outline using BoardOutlineCommands
             # This properly creates edge cuts on Edge.Cuts layer
             from commands.board.outline import BoardOutlineCommands
@@ -54,7 +61,7 @@ class BoardSizeCommands:
             if result.get("success"):
                 return {
                     "success": True,
-                    "message": f"Created board outline: {width}x{height} {unit}",
+                    "message": f"Board size set to {width}x{height} {unit} (visible in KiCAD UI)",
                     "size": {
                         "width": width,
                         "height": height,

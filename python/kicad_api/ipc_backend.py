@@ -324,11 +324,7 @@ class IPCBoardAPI(BoardAPI):
 
     def set_size(self, width: float, height: float, unit: str = "mm") -> bool:
         """
-        Set board size.
-
-        Note: Board size in KiCAD is typically defined by the board outline,
-        not a direct size property. This method may need to create/modify
-        the board outline.
+        Set board size by clearing existing Edge.Cuts and creating a new rectangle.
         """
         try:
             from kipy.board_types import BoardRectangle
@@ -343,23 +339,27 @@ class IPCBoardAPI(BoardAPI):
                 w = from_mm(width)
                 h = from_mm(height)
             else:
-                w = int(width * INCH_TO_NM)
-                h = int(height * INCH_TO_NM)
+                w = int(width * 25400000)
+                h = int(height * 25400000)
+
+            # Clear existing board outline on Edge.Cuts layer
+            commit = board.begin_commit()
+            shapes = board.get_shapes()
+            edge_cuts_shapes = [s for s in shapes if s.layer == BoardLayer.BL_Edge_Cuts]
+            if edge_cuts_shapes:
+                board.remove_items(edge_cuts_shapes)
 
             # Create board outline rectangle on Edge.Cuts layer
             rect = BoardRectangle()
             rect.start = Vector2.from_xy(0, 0)
             rect.end = Vector2.from_xy(w, h)
             rect.layer = BoardLayer.BL_Edge_Cuts
-            rect.width = from_mm(0.1)  # Standard edge cut width
+            rect.width = from_mm(0.1)
 
-            # Begin transaction for undo support
-            commit = board.begin_commit()
             board.create_items(rect)
             board.push_commit(commit, f"Set board size to {width}x{height} {unit}")
 
             self._notify("board_size", {"width": width, "height": height, "unit": unit})
-
             return True
 
         except Exception as e:
